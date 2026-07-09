@@ -1,0 +1,24 @@
+@isTest
+public class TestDataFactory {
+    
+    public static List<Contact> createContacts(Integer numContacts) {
+        List<Contact> contacts = new List<Contact>();
+        for (Integer i = 0; i < numContacts; i++) {
+            contacts.add(new Contact(
+                LastName = 'TestContact' + i,
+                Email = 'testcontact' + i + '@example.com'
+            ));
+        }
+        insert contacts;
+        return contacts;
+    }
+    public static Enrollment_Score__c createEnrollmentScoreRecord(Id contactId, Decimal score, String action, DateTime scoredAt) {
+        return new Enrollment_Score__c(
+            Contact__c = contactId,
+            Score__c = score,
+            Recommended_Action__c = action,
+            Source_System__c = 'EDMO Test Bot',
+            Scored_At__c = scoredAt
+        );
+    }
+}
