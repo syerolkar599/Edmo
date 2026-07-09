@@ -1,0 +1,36 @@
+<template>
+    <lightning-card title="Enrollment Intelligence" icon-name="custom:custom67">
+        <div class="slds-var-p-around_medium">
+            <template if:true={scoreRecord}>
+                <div class="slds-grid slds-wrap slds-grid_align-spread slds-grid_vertical-align-center slds-var-m-bottom_small">
+                    <div class="slds-text-heading_medium">
+                        Score: <strong>{scoreRecord.Score__c}</strong>
+                    </div>
+                    <div>
+                        <span class={badgeClass}>{badgeLabel}</span>
+                    </div>
+                </div>
+
+                <div class="slds-text-body_regular slds-var-m-bottom_xx-small">
+                    <strong>Recommended Action:</strong> {scoreRecord.Recommended_Action__c}
+                </div>
+                <div class="slds-text-body_regular slds-var-m-bottom_xx-small">
+                    <strong>Source System:</strong> {scoreRecord.Source_System__c}
+                </div>
+                <div class="slds-text-body_regular">
+                    <strong>Scored At:</strong>&nbsp;
+                    <lightning-formatted-date-time 
+                        value={scoreRecord.Scored_At__c} 
+                        year="numeric" month="short" day="2-digit" hour="2-digit" minute="2-digit">
+                    </lightning-formatted-date-time>
+                </div>
+            </template>
+
+            <template if:false={scoreRecord}>
+                <div class="slds-text-align_center slds-text-color_weak slds-var-p-around_medium">
+                    No enrollment score available yet.
+                </div>
+            </template>
+        </div>
+    </lightning-card>
+</template>
