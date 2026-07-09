@@ -1,0 +1,156 @@
+@isTest
+private class EnrollmentIntelligenceTest {
+
+    @testSetup
+    static void setupData() {
+        TestDataFactory.createContacts(7);
+    }
+
+    // ==========================================
+    // TASK 1: REST ENDPOINT TESTS
+    // ==========================================
+    @isTest
+    static void testRESTEndpointMixedPayload() {
+        List<Contact> contacts = [SELECT Email FROM Contact WHERE Email LIKE 'testcontact%'];
+        
+        String jsonPayload = '{ "scores": [ ' +
+            '{ "contactEmail": "' + contacts[0].Email + '", "score": 85, "recommendedAction": "Schedule Call" },' +
+            '{ "contactEmail": "missing@example.com", "score": 42, "recommendedAction": "Send Info Pack" },' +
+            '{ "contactEmail": "", "score": 60, "recommendedAction": "Assign Counselor" }' + // Missing Email Scenario
+            '] }';
+
+        RestRequest req = new RestRequest();
+        req.requestURI = '/services/apexrest/enrollment-scores/';
+        req.httpMethod = 'POST';
+        req.requestBody = Blob.valueOf(jsonPayload);
+        RestContext.request = req;
+
+        Test.startTest();
+        EnrollmentScoreRESTService.ResponseWrapper resp = EnrollmentScoreRESTService.doPost();
+        Test.stopTest();
+
+        System.assertEquals(3, resp.results.size(), 'Should have returned results for three processed items');
+        System.assertEquals(true, resp.results[0].success, 'Valid email must succeed');
+        System.assertEquals(false, resp.results[1].success, 'Missing contact email in system must return a controlled error');
+        System.assertEquals(false, resp.results[2].success, 'Blank email payload must return a controlled error');
+        System.assertEquals('Email address missing.', resp.results[2].errorMessage, 'Error message should match the blank email rule');
+    }
+
+    @isTest
+    static void testRESTEndpointBulkPayload() {
+        List<Contact> contacts = [SELECT Email FROM Contact WHERE Email LIKE 'testcontact%'];
+        
+        String jsonPayload = '{ "scores": [ ' +
+            '{ "contactEmail": "' + contacts[0].Email + '", "score": 90, "recommendedAction": "Schedule Call" },' +
+            '{ "contactEmail": "' + contacts[1].Email + '", "score": 80, "recommendedAction": "Schedule Call" },' +
+            '{ "contactEmail": "' + contacts[2].Email + '", "score": 70, "recommendedAction": "Send Info Pack" },' +
+            '{ "contactEmail": "' + contacts[3].Email + '", "score": 50, "recommendedAction": "Send Info Pack" },' +
+            '{ "contactEmail": "' + contacts[4].Email + '", "score": 20, "recommendedAction": "Assign Counselor" }' +
+            '] }';
+
+        RestRequest req = new RestRequest();
+        req.requestURI = '/services/apexrest/enrollment-scores/';
+        req.httpMethod = 'POST';
+        req.requestBody = Blob.valueOf(jsonPayload);
+        RestContext.request = req;
+
+        Test.startTest();
+        EnrollmentScoreRESTService.ResponseWrapper resp = EnrollmentScoreRESTService.doPost();
+        Test.stopTest();
+
+        System.assertEquals(5, resp.results.size(), 'Should process all 5 bulk records');
+        System.assertEquals(5, [SELECT count() FROM Enrollment_Score__c], '5 score records should be created in the database');
+    }
+
+    @isTest
+    static void testRESTEndpointNullPayload() {
+        RestRequest req = new RestRequest();
+        req.requestURI = '/services/apexrest/enrollment-scores/';
+        req.httpMethod = 'POST';
+        req.requestBody = Blob.valueOf(''); 
+        RestContext.request = req;
+        RestContext.response = new RestResponse();
+
+        Test.startTest();
+        EnrollmentScoreRESTService.ResponseWrapper resp = EnrollmentScoreRESTService.doPost();
+        Test.stopTest();
+
+        System.assertEquals(400, RestContext.response.statusCode, 'An empty body should return a 400 Status Code');
+        System.assertEquals(0, resp.results.size(), 'Results list should be empty');
+    }
+
+    @isTest
+    static void testRESTEndpointExceptionPath() {
+        RestRequest req = new RestRequest();
+        req.requestURI = '/services/apexrest/enrollment-scores/';
+        req.httpMethod = 'POST';
+        req.requestBody = Blob.valueOf('{ "scores": "This should be an array, not a string" }'); 
+        RestContext.request = req;
+        RestContext.response = new RestResponse();
+
+        Test.startTest();
+        EnrollmentScoreRESTService.ResponseWrapper resp = EnrollmentScoreRESTService.doPost();
+        Test.stopTest();
+
+        System.assertEquals(500, RestContext.response.statusCode, 'An exception should return a 500 Status Code');
+        System.assertEquals(1, resp.results.size(), 'Should return a single global error result');
+        System.assertEquals(false, resp.results[0].success, 'Global result should mark success as false');
+    }
+
+    // ==========================================
+    // TASK 2: TRIGGER BUSINESS LOGIC TESTS
+    // ==========================================
+    @isTest
+    static void testTriggerPriorityCalculationAndDeduplication() {
+        List<Contact> targets = [SELECT Id FROM Contact LIMIT 3];
+
+        List<Enrollment_Score__c> scoresToInsert = new List<Enrollment_Score__c>{
+            // Contact 0: Tests 'Cold' score map and "Latest Wins" timeline behavior
+            TestDataFactory.createEnrollmentScoreRecord(targets[0].Id, 95, 'Schedule Call', System.now().addMinutes(-10)),
+            TestDataFactory.createEnrollmentScoreRecord(targets[0].Id, 15, 'Assign Counselor', System.now()), 
+
+            // Contact 1: Tests 'Warm' score map and "Latest Wins" timeline when older arrives last
+            TestDataFactory.createEnrollmentScoreRecord(targets[1].Id, 55, 'Send Info Pack', System.now()), 
+            TestDataFactory.createEnrollmentScoreRecord(targets[1].Id, 90, 'Schedule Call', System.now().addMinutes(-30)), 
+
+            // Contact 2: Tests 'Hot' score range boundary mapping
+            TestDataFactory.createEnrollmentScoreRecord(targets[2].Id, 80, 'Schedule Call', System.now()), 
+
+            // Edge Cases: Null records for full handler defensive line coverage
+            new Enrollment_Score__c(Score__c = 100), 
+            new Enrollment_Score__c(Contact__c = targets[0].Id) 
+        };
+
+        Test.startTest();
+        insert scoresToInsert; 
+        Test.stopTest();
+
+        Map<Id, Contact> updatedContactsMap = new Map<Id, Contact>([
+            SELECT Id, Enrollment_Priority__c FROM Contact WHERE Id IN :targets
+        ]);
+
+        System.assertEquals('Cold', updatedContactsMap.get(targets[0].Id).Enrollment_Priority__c, 'The newest timestamped payload must override earlier scores.');
+        System.assertEquals('Warm', updatedContactsMap.get(targets[1].Id).Enrollment_Priority__c, 'An older payload added to a batch must not replace a newer score entry.');
+        System.assertEquals('Hot', updatedContactsMap.get(targets[2].Id).Enrollment_Priority__c, 'A score of 80 must cleanly process as Hot.');
+    }
+
+    // ==========================================
+    // TASK 3: CONTROLLER TEST
+    // ==========================================
+    @isTest
+    static void testControllerMethod() {
+        Contact target = [SELECT Id FROM Contact LIMIT 1];
+        
+        List<Enrollment_Score__c> history = new List<Enrollment_Score__c>{
+            TestDataFactory.createEnrollmentScoreRecord(target.Id, 45, 'Send Info Pack', System.now().addHours(-1)),
+            TestDataFactory.createEnrollmentScoreRecord(target.Id, 85, 'Schedule Call', System.now())
+        };
+        insert history;
+
+        Test.startTest();
+        Enrollment_Score__c fetchedScore = EnrollmentScoreController.getLatestScore(target.Id);
+        Test.stopTest();
+
+        System.assertEquals(85, fetchedScore.Score__c, 'Controller should return the newest record based on Scored_At__c');
+    }
+}
