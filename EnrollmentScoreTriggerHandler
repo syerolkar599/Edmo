@@ -1,0 +1,58 @@
+public with sharing class EnrollmentScoreTriggerHandler {
+
+    public static void handleAfterInsert(List<Enrollment_Score__c> newScores) {
+        Map<Id, Enrollment_Score__c> contactToLatestScoreMap = new Map<Id, Enrollment_Score__c>();
+
+        // 1. Process batch and resolve duplicate scores for the same Contact (Latest Scored_At__c wins)
+        for (Enrollment_Score__c currentScore : newScores) {
+            if (currentScore.Contact__c == null || currentScore.Score__c == null) {
+                continue;
+            }
+
+            if (!contactToLatestScoreMap.containsKey(currentScore.Contact__c)) {
+                contactToLatestScoreMap.put(currentScore.Contact__c, currentScore);
+            } else {
+                Enrollment_Score__c existingScore = contactToLatestScoreMap.get(currentScore.Contact__c);
+                // Handle edge case where Scored_At__c might be null
+                DateTime existingTime = existingScore.Scored_At__c != null ? existingScore.Scored_At__c : DateTime.newInstance(0);
+                DateTime currentTime = currentScore.Scored_At__c != null ? currentScore.Scored_At__c : DateTime.newInstance(0);
+
+                if (currentTime >= existingTime) {
+                    contactToLatestScoreMap.put(currentScore.Contact__c, currentScore);
+                }
+            }
+        }
+
+        if (contactToLatestScoreMap.isEmpty()) {
+            return;
+        }
+
+        // 2. Generate Contact updates based on the evaluated score ranges
+        List<Contact> contactsToUpdate = new List<Contact>();
+        for (Id contactId : contactToLatestScoreMap.keySet()) {
+            Enrollment_Score__c winnerScore = contactToLatestScoreMap.get(contactId);
+            Decimal scoreVal = winnerScore.Score__c;
+            String priority;
+
+            if (scoreVal >= 75 && scoreVal <= 100) {
+                priority = 'Hot';
+            } else if (scoreVal >= 40 && scoreVal <= 74) {
+                priority = 'Warm';
+            } else if (scoreVal >= 0 && scoreVal <= 39) {
+                priority = 'Cold';
+            }
+
+            if (priority != null) {
+                contactsToUpdate.add(new Contact(
+                    Id = contactId,
+                    Enrollment_Priority__c = priority
+                ));
+            }
+        }
+
+        // 3. Update contacts securely
+        if (!contactsToUpdate.isEmpty()) {
+            update as system contactsToUpdate;
+        }
+    }
+}
