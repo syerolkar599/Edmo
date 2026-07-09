@@ -1,0 +1,129 @@
+@RestResource(urlMapping='/enrollment-scores/*')
+global with sharing class EnrollmentScoreRESTService {
+
+    @HttpPost
+    global static ResponseWrapper doPost() {
+        RestRequest req = RestContext.request;
+        ResponseWrapper response = new ResponseWrapper();
+        response.results = new List<RecordResult>();
+
+        if (req == null || String.isBlank(req.requestBody.toString())) {
+            RestContext.response.statusCode = 400;
+            return response;
+        }
+
+        try {
+            RequestWrapper parsedBody = (RequestWrapper) JSON.deserialize(req.requestBody.toString(), RequestWrapper.class);
+            if (parsedBody.scores == null || parsedBody.scores.isEmpty()) {
+                return response;
+            }
+
+            // 1. Extract unique emails to bulk query Contacts
+            Set<String> emailsToQuery = new Set<String>();
+            for (ScorePayload payload : parsedBody.scores) {
+                if (String.isNotBlank(payload.contactEmail)) {
+                    emailsToQuery.add(payload.contactEmail.toLowerCase());
+                }
+            }
+
+            // 2. Query Contacts and map Email -> ContactId
+            Map<String, Id> emailToContactIdMap = new Map<String, Id>();
+            for (Contact con : [SELECT Id, Email FROM Contact WHERE Email IN :emailsToQuery]) {
+                if (con.Email != null) {
+                    emailToContactIdMap.put(con.Email.toLowerCase(), con.Id);
+                }
+            }
+
+            // 3. Process records and build records to insert
+            List<Enrollment_Score__c> scoresToInsert = new List<Enrollment_Score__c>();
+            // Keep track of payload indices mapping to successfully parsed records
+            List<Integer> successfulPayloadIndices = new List<Integer>();
+
+            for (Integer i = 0; i < parsedBody.scores.size(); i++) {
+                ScorePayload payload = parsedBody.scores[i];
+                RecordResult res = new RecordResult();
+                res.email = payload.contactEmail;
+
+                if (String.isBlank(payload.contactEmail)) {
+                    res.success = false;
+                    res.errorMessage = 'Email address missing.';
+                    response.results.add(res);
+                    continue;
+                }
+
+                String lookupEmail = payload.contactEmail.toLowerCase();
+                if (!emailToContactIdMap.containsKey(lookupEmail)) {
+                    res.success = false;
+                    res.errorMessage = 'Contact not found for email: ' + payload.contactEmail;
+                    response.results.add(res);
+                } else {
+                    // Populate record and stage for insertion
+                    Enrollment_Score__c scoreRec = new Enrollment_Score__c(
+                        Contact__c = emailToContactIdMap.get(lookupEmail),
+                        Score__c = payload.score,
+                        Recommended_Action__c = payload.recommendedAction,
+                        Source_System__c = payload.sourceSystem,
+                        Scored_At__c = payload.scoredAt != null ? payload.scoredAt : System.now()
+                    );
+                    scoresToInsert.add(scoreRec);
+                    successfulPayloadIndices.add(i);
+                    
+                    // Default response placeholder (will update if DML fails)
+                    res.success = true;
+                    res.errorMessage = null;
+                    response.results.add(res);
+                }
+            }
+
+            // 4. Perform partial DML to ensure per-record tracking
+            if (!scoresToInsert.isEmpty()) {
+                Database.SaveResult[] srList = Database.insert(scoresToInsert, false);
+                for (Integer i = 0; i < srList.size(); i++) {
+                    Integer originalPayloadIndex = successfulPayloadIndices[i];
+                    Database.SaveResult sr = srList[i];
+                    
+                    if (!sr.isSuccess()) {
+                        response.results[originalPayloadIndex].success = false;
+                        List<String> errors = new List<String>();
+                        for (Database.Error err : sr.getErrors()) {
+                            errors.add(err.getMessage());
+                        }
+                        response.results[originalPayloadIndex].errorMessage = String.join(errors, '; ');
+                    }
+                }
+            }
+
+        } catch (Exception ex) {
+            RestContext.response.statusCode = 500;
+            RecordResult globalError = new RecordResult();
+            globalError.success = false;
+            globalError.errorMessage = 'Fatal Error processing request: ' + ex.getMessage();
+            response.results.add(globalError);
+        }
+
+        return response;
+    }
+
+    // JSON Structure Wrappers
+    global class RequestWrapper {
+        global List<ScorePayload> scores;
+    }
+
+    global class ScorePayload {
+        global String contactEmail;
+        global Integer score;
+        global String recommendedAction;
+        global String sourceSystem;
+        global DateTime scoredAt;
+    }
+
+    global class ResponseWrapper {
+        global List<RecordResult> results;
+    }
+
+    global class RecordResult {
+        global String email;
+        global Boolean success;
+        global String errorMessage;
+    }
+}
